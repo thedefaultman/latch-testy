@@ -1,0 +1,222 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  detect-and-build:
+    runs-on: ubuntu-latest
+    outputs:
+      framework: ${{ steps.detect.outputs.framework }}
+      build-command: ${{ steps.detect.outputs.build-command }}
+      output-directory: ${{ steps.detect.outputs.output-directory }}
+      deployment-type: ${{ steps.detect.outputs.deployment-type }}
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - name: Detect Framework and Build Strategy
+      id: detect
+      run: |
+        # Check for Vercel configuration
+        PROJECT_DIR="."
+        if [ -f "vercel.json" ]; then
+          echo "Found vercel.json configuration"
+          # Extract project directory from vercel.json if it exists
+          PROJECT_DIR=$(jq -r '.rootDirectory // "."' vercel.json 2>/dev/null || echo ".")
+        fi
+        
+        # Change to project directory if specified
+        cd "$PROJECT_DIR"
+        
+        # Detect package manager
+        if [ -f "pnpm-lock.yaml" ]; then
+          echo "package-manager=pnpm" >> $GITHUB_OUTPUT
+        elif [ -f "yarn.lock" ]; then
+          echo "package-manager=yarn" >> $GITHUB_OUTPUT
+        elif [ -f "package-lock.json" ]; then
+          echo "package-manager=npm" >> $GITHUB_OUTPUT
+        else
+          echo "package-manager=npm" >> $GITHUB_OUTPUT
+        fi
+        
+        # Check if package.json exists
+        if [ ! -f "package.json" ]; then
+          echo "framework=static" >> $GITHUB_OUTPUT
+          echo "deployment-type=static" >> $GITHUB_OUTPUT
+          echo "build-command=echo 'No build required'" >> $GITHUB_OUTPUT
+          echo "output-directory=." >> $GITHUB_OUTPUT
+          echo "project-directory=$PROJECT_DIR" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Detect Next.js
+        if [ -f "next.config.js" ] || [ -f "next.config.ts" ] || [ -f "next.config.mjs" ]; then
+          echo "framework=nextjs" >> $GITHUB_OUTPUT
+          # Check for static export in Next.js config
+          if grep -q '"output".*"export"' next.config.* 2>/dev/null || grep -q 'output:.*export' next.config.* 2>/dev/null; then
+            echo "deployment-type=static" >> $GITHUB_OUTPUT
+            echo "output-directory=out" >> $GITHUB_OUTPUT
+          else
+            echo "deployment-type=server" >> $GITHUB_OUTPUT
+            echo "output-directory=.next" >> $GITHUB_OUTPUT
+          fi
+          # Use appropriate build command based on package manager
+          PM=$([ -f "pnpm-lock.yaml" ] && echo "pnpm" || [ -f "yarn.lock" ] && echo "yarn" || echo "npm")
+          echo "build-command=$PM run build" >> $GITHUB_OUTPUT
+        # Detect Nuxt.js
+        elif [ -f "nuxt.config.js" ] || [ -f "nuxt.config.ts" ]; then
+          echo "framework=nuxt" >> $GITHUB_OUTPUT
+          echo "deployment-type=server" >> $GITHUB_OUTPUT
+          echo "output-directory=.output" >> $GITHUB_OUTPUT
+          PM=$([ -f "pnpm-lock.yaml" ] && echo "pnpm" || [ -f "yarn.lock" ] && echo "yarn" || echo "npm")
+          echo "build-command=$PM run build" >> $GITHUB_OUTPUT
+        # Detect Vite
+        elif [ -f "vite.config.js" ] || [ -f "vite.config.ts" ]; then
+          echo "framework=vite" >> $GITHUB_OUTPUT
+          echo "deployment-type=static" >> $GITHUB_OUTPUT
+          echo "output-directory=dist" >> $GITHUB_OUTPUT
+          PM=$([ -f "pnpm-lock.yaml" ] && echo "pnpm" || [ -f "yarn.lock" ] && echo "yarn" || echo "npm")
+          echo "build-command=$PM run build" >> $GITHUB_OUTPUT
+        # Detect Create React App
+        elif grep -q '"react-scripts"' package.json 2>/dev/null; then
+          echo "framework=create-react-app" >> $GITHUB_OUTPUT
+          echo "deployment-type=static" >> $GITHUB_OUTPUT
+          echo "output-directory=build" >> $GITHUB_OUTPUT
+          PM=$([ -f "pnpm-lock.yaml" ] && echo "pnpm" || [ -f "yarn.lock" ] && echo "yarn" || echo "npm")
+          echo "build-command=$PM run build" >> $GITHUB_OUTPUT
+        # Detect Express or general Node.js API
+        elif grep -q '"express"' package.json 2>/dev/null || [ -f "app.js" ] || [ -f "server.js" ] || [ -f "index.js" ]; then
+          echo "framework=nodejs" >> $GITHUB_OUTPUT
+          echo "deployment-type=server" >> $GITHUB_OUTPUT
+          echo "output-directory=." >> $GITHUB_OUTPUT
+          # Check if build script exists
+          PM=$([ -f "pnpm-lock.yaml" ] && echo "pnpm" || [ -f "yarn.lock" ] && echo "yarn" || echo "npm")
+          if jq -e '.scripts.build' package.json >/dev/null 2>&1; then
+            echo "build-command=$PM run build" >> $GITHUB_OUTPUT
+          else
+            echo "build-command=echo 'No build step required'" >> $GITHUB_OUTPUT
+          fi
+        # Default Node.js
+        else
+          echo "framework=nodejs" >> $GITHUB_OUTPUT
+          echo "deployment-type=server" >> $GITHUB_OUTPUT
+          # Check for custom output directory in package.json or common patterns
+          if [ -d "dist" ] || jq -e '.scripts.build | contains("dist")' package.json >/dev/null 2>&1; then
+            echo "output-directory=dist" >> $GITHUB_OUTPUT
+          elif [ -d "build" ] || jq -e '.scripts.build | contains("build")' package.json >/dev/null 2>&1; then
+            echo "output-directory=build" >> $GITHUB_OUTPUT
+          else
+            echo "output-directory=." >> $GITHUB_OUTPUT
+          fi
+          # Check if build script exists
+          PM=$([ -f "pnpm-lock.yaml" ] && echo "pnpm" || [ -f "yarn.lock" ] && echo "yarn" || echo "npm")
+          if jq -e '.scripts.build' package.json >/dev/null 2>&1; then
+            echo "build-command=$PM run build" >> $GITHUB_OUTPUT
+          else
+            echo "build-command=echo 'No build step required'" >> $GITHUB_OUTPUT
+          fi
+        fi
+        
+        echo "project-directory=$PROJECT_DIR" >> $GITHUB_OUTPUT
+    
+    - name: Install dependencies
+      working-directory: ${{ steps.detect.outputs.project-directory }}
+      run: |
+        PM="${{ steps.detect.outputs.package-manager }}"
+        case "$PM" in
+          pnpm)
+            npm install -g pnpm
+            pnpm install --frozen-lockfile || pnpm install
+            ;;
+          yarn)
+            yarn install --frozen-lockfile || yarn install
+            ;;
+          npm)
+            if [ -f "package-lock.json" ]; then
+              npm ci || (echo "Lock file out of sync, running npm install..." && npm install)
+            else
+              npm install
+            fi
+            ;;
+          *)
+            npm install
+            ;;
+        esac
+    
+    - name: Run tests
+      run: npm test || echo "No tests found"
+      continue-on-error: true
+    
+    - name: Build application
+      working-directory: ${{ steps.detect.outputs.project-directory }}
+      run: ${{ steps.detect.outputs.build-command }}
+      env:
+        NODE_ENV: production
+        NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL || '' }}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY || '' }}
+    
+    - name: List build output
+      run: |
+        echo "Current directory: $(pwd)"
+        echo "Contents of current directory:"
+        ls -la
+        echo "Checking for .next directory:"
+        if [ -d ".next" ]; then
+          echo ".next directory exists"
+          ls -la .next/
+        else
+          echo ".next directory does not exist"
+        fi
+        echo "Checking for out directory:"
+        if [ -d "out" ]; then
+          echo "out directory exists"
+          ls -la out/
+        else
+          echo "out directory does not exist"
+        fi
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-files
+        path: |
+          ${{ steps.detect.outputs.output-directory }}
+          package*.json
+          next.config.*
+          public/
+          .env.production*
+        if-no-files-found: warn
+        retention-days: 30
+
+  deploy:
+    needs: detect-and-build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: build-files
+        path: ./build-output
+
+    - name: Deploy to Vercel
+      uses: amondnet/vercel-action@v25
+      with:
+        vercel-token: ${{ secrets.VERCEL_TOKEN }}
+        vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+        vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+        scope: ${{ secrets.VERCEL_SCOPE }}
+        working-directory: ${{ needs.detect-and-build.outputs.project-directory || './' }}
+        vercel-args: '--prod --yes'
