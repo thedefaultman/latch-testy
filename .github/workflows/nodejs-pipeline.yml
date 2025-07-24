@@ -1,0 +1,63 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Dependencies
+      run: |
+        npm install -g netlify-cli
+        sudo apt-get install -y jq
+    
+    - name: Create or get Netlify site
+      id: netlify-site
+      run: |
+        # Set non-interactive mode
+        export CI=true
+        
+        # Site name based on GitHub repo
+        SITE_NAME="${{ github.event.repository.name }}-${{ github.repository_owner }}"
+        
+        # Check if site exists using API
+        echo "Checking for existing site..."
+        EXISTING_SITE=$(netlify api listSites --data '{}' | jq -r ".[] | select(.name == "$SITE_NAME") | .id" | head -n1 || echo "")
+        
+        if [ -n "$EXISTING_SITE" ]; then
+          SITE_ID="$EXISTING_SITE"
+          echo "Found existing site: $SITE_ID"
+        else
+          # Create new site using API
+          echo "Creating new site..."
+          CREATE_RESPONSE=$(netlify api createSite --data "{\"name\": "$SITE_NAME\"}")
+          SITE_ID=$(echo "$CREATE_RESPONSE" | jq -r '.id')
+          echo "Created new site: $SITE_ID"
+        fi
+        
+        # Output the site ID for use in next steps
+        echo "site_id=$SITE_ID" >> $GITHUB_OUTPUT
+        echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
+      env:
+        NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+    
+    - name: Deploy to Netlify
+      run: |
+        netlify deploy --prod --site ${{ steps.netlify-site.outputs.site_id }} --message "Deploy from GitHub Actions"
+      env:
+        NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL || '' }}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY || '' }}
+      if: github.ref == 'refs/heads/main'
+    
+    - name: Display site URL
+      run: |
+        echo "🚀 Site deployed to: https://${{ steps.netlify-site.outputs.site_name }}.netlify.app"
+      if: github.ref == 'refs/heads/main'
