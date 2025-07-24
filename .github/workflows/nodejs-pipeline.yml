@@ -1,0 +1,101 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: |
+        if [ -f "package-lock.json" ]; then
+          npm ci || npm install
+        elif [ -f "yarn.lock" ]; then
+          yarn install --frozen-lockfile || yarn install
+        elif [ -f "pnpm-lock.yaml" ]; then
+          npm install -g pnpm && pnpm install --frozen-lockfile || pnpm install
+        else
+          npm install
+        fi
+    
+    - name: Detect and configure for Netlify
+      id: netlify-config
+      run: |
+        # Detect framework and set appropriate build settings for Netlify
+        if [ -f "next.config.js" ] || [ -f "next.config.ts" ] || [ -f "next.config.mjs" ]; then
+          echo "Framework: Next.js detected"
+          
+          # Configure Next.js for static export (required for Netlify)
+          echo "Configuring Next.js for static export..."
+          cat > next.config.override.js << 'EOF'
+        const nextConfig = {
+          output: 'export',
+          trailingSlash: true,
+          images: {
+            unoptimized: true
+          }
+        }
+        module.exports = nextConfig
+        EOF
+          
+          # Backup original config and use override
+          if [ -f "next.config.js" ]; then mv next.config.js next.config.original.js; fi
+          if [ -f "next.config.ts" ]; then mv next.config.ts next.config.original.ts; fi
+          if [ -f "next.config.mjs" ]; then mv next.config.mjs next.config.original.mjs; fi
+          mv next.config.override.js next.config.js
+          
+          echo "publish-dir=out" >> $GITHUB_OUTPUT
+        elif [ -f "vite.config.js" ] || [ -f "vite.config.ts" ]; then
+          echo "Framework: Vite detected"
+          echo "publish-dir=dist" >> $GITHUB_OUTPUT
+        elif grep -q '"react-scripts"' package.json 2>/dev/null; then
+          echo "Framework: Create React App detected" 
+          echo "publish-dir=build" >> $GITHUB_OUTPUT
+        elif [ -f "nuxt.config.js" ] || [ -f "nuxt.config.ts" ]; then
+          echo "Framework: Nuxt.js detected"
+          echo "publish-dir=.output/public" >> $GITHUB_OUTPUT
+        else
+          echo "Framework: Generic Node.js project"
+          # Try common output directories
+          if [ -d "dist" ]; then
+            echo "publish-dir=dist" >> $GITHUB_OUTPUT
+          elif [ -d "build" ]; then
+            echo "publish-dir=build" >> $GITHUB_OUTPUT
+          else
+            echo "publish-dir=." >> $GITHUB_OUTPUT
+          fi
+        fi
+    
+    - name: Build application
+      run: npm run build
+      env:
+        NODE_ENV: production
+        NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL || '' }}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY || '' }}
+    
+    - name: Deploy to Netlify
+      uses: nwtgck/actions-netlify@v3.0
+      with:
+        publish-dir: ${{ steps.netlify-config.outputs.publish-dir }}
+        production-branch: main
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        deploy-message: "Deploy from GitHub Actions"
+        enable-pull-request-comment: false
+        enable-commit-comment: true
+        overwrites-pull-request-comment: true
+      env:
+        NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
