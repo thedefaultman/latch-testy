@@ -1,0 +1,71 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Dependencies
+      run: |
+        npm install -g netlify-cli
+        sudo apt-get install -y jq
+    
+    - name: Setup Netlify Site
+      id: setup-site
+      run: |
+        # Check if .netlify/state.json exists and has site_id
+        if [ -f .netlify/state.json ] && [ "$(jq -r '.siteId // empty' .netlify/state.json)" != "" ]; then
+          SITE_ID=$(jq -r '.siteId' .netlify/state.json)
+          echo "Found existing site ID in .netlify/state.json: $SITE_ID"
+        else
+          # Create new site
+          SITE_NAME="${{ github.event.repository.name }}-${{ github.repository_owner }}"
+          
+          # Check if site already exists
+          EXISTING_SITE=$(netlify sites:list --json | jq -r ".[] | select(.name == "$SITE_NAME") | .id" | head -n1 || echo "")
+          
+          if [ -n "$EXISTING_SITE" ]; then
+            SITE_ID="$EXISTING_SITE"
+            echo "Found existing site: $SITE_ID"
+          else
+            # Create new site
+            CREATE_OUTPUT=$(netlify sites:create --name "$SITE_NAME" --json)
+            SITE_ID=$(echo "$CREATE_OUTPUT" | jq -r '.site_id')
+            echo "Created new site: $SITE_ID"
+          fi
+          
+          # Link the site (this creates .netlify/state.json)
+          netlify link --id "$SITE_ID"
+        fi
+        
+        echo "site_id=$SITE_ID" >> $GITHUB_OUTPUT
+      env:
+        NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+    
+    - name: Deploy to Netlify
+      run: |
+        netlify deploy --prod --message "Deploy from GitHub Actions"
+      env:
+        NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL || '' }}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY || '' }}
+      if: github.ref == 'refs/heads/main'
+    
+    - name: Commit .netlify directory if created
+      run: |
+        if [ -f .netlify/state.json ] && ! git ls-files --error-unmatch .netlify/state.json > /dev/null 2>&1; then
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .netlify/state.json
+          git commit -m "Add Netlify site configuration"
+          git push
+        fi
+      if: github.ref == 'refs/heads/main'
